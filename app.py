@@ -385,7 +385,7 @@ Devuelve EXCLUSIVAMENTE un JSON válido con esta estructura:
 # CONFIG GENERAL DE STREAMLIT
 # ============================================================
 st.set_page_config(
-    page_title="Centinela Digital – Integridad académica con IA","Corporación Universitaria Iberoamericana [IBERO]"
+    page_title="Centinela Digital – Integridad académica con IA" - "Corporación Universitaria Iberoamericana [IBERO]"
     page_icon="🛡️",
     layout="wide",
 )

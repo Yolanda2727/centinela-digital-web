@@ -1,6 +1,5 @@
 streamlit==1.39.0
-python-docx
-PyPDF2
-textblob
-openai>=1.59.0
+pandas
 altair
+textblob
+scikit-learn

@@ -385,7 +385,7 @@ Devuelve EXCLUSIVAMENTE un JSON válido con esta estructura:
 # CONFIG GENERAL DE STREAMLIT
 # ============================================================
 st.set_page_config(
-    page_title="Centinela Digital – Integridad académica con IA"
+    page_title="Centinela Digital – Integridad académica con IA",
     page_icon="🛡️",
     layout="wide",
 )
@@ -396,7 +396,7 @@ if "historial" not in st.session_state:
 st.sidebar.title("🛡️ Centinela Digital")
 st.sidebar.markdown(
     """
-**Monitor de integridad académica y científica con apoyo de IA.** **Corporación Universitaria Iberoamericana [IBERO]**
+**Monitor de integridad académica y científica con apoyo de IA.**
 
 Software desarrollado por **Prof. Anderson Díaz Pérez**  
 (Doctor en Bioética, Doctor en Salud Pública, Magister en Ciencias Básicas Biomédicas, Especialista en IA).

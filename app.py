@@ -186,123 +186,178 @@ Devuelve EXCLUSIVAMENTE un JSON válido con esta estructura:
         }
     return data
 
+from fpdf import FPDF
 
-def build_pdf_report(case_data: dict, analysis: dict, risk_df: pd.DataFrame) -> bytes:
-    """Construye el PDF estructurado del caso."""
+# --- Utilidades para texto seguro en PDF ------------------------------------
+
+def _break_long_words(text: str, max_len: int = 60) -> str:
+    """
+    Evita el error 'Not enough horizontal space...' partiendo palabras muy largas
+    (p.ej. URLs) en trozos manejables.
+    """
+    words = text.split(" ")
+    pieces = []
+
+    for w in words:
+        if len(w) <= max_len:
+            pieces.append(w)
+        else:
+            # Cortar palabras largas en segmentos
+            for i in range(0, len(w), max_len):
+                pieces.append(w[i:i + max_len])
+
+    return " ".join(pieces)
+
+def safe_pdf_text(text: str) -> str:
+    """
+    1) Sustituye caracteres Unicode problemáticos (–, “ ”, …).
+    2) Rompe palabras larguísimas.
+    3) Garantiza que el resultado pueda escribirse en latin-1.
+    """
+    if not text:
+        return ""
+
+    # Sustituir caracteres frecuentes en español académico
+    replacements = {
+        "–": "-", "—": "-",
+        "“": '"', "”": '"',
+        "‘": "'", "’": "'",
+        "…": "...",
+        "•": "-",
+        "º": "o", "ª": "a",
+        "→": "->",
+        "°": " grados",
+        "\u00a0": " ",  # espacio no separable
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    # Romper palabras muy largas (URLs, IDs, etc.)
+    text = _break_long_words(text, max_len=60)
+
+    # Forzar compatibilidad latin-1, sustituyendo lo que quede raro por '?'
+    text = text.encode("latin-1", "replace").decode("latin-1")
+    return text
+
+def build_pdf_report(case_data: dict, analysis: dict) -> bytes:
+    """
+    Genera un informe PDF corto para comité / tutor.
+    Usa safe_pdf_text() para evitar problemas de Unicode y palabras largas.
+    """
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_title("Informe Centinela Digital")
 
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Centinela Digital – Informe de caso", ln=True)
-    pdf.set_font("Arial", "", 11)
-    pdf.cell(0, 6, "Monitorizando la integridad académica y científica con apoyo de IA", ln=True)
+    # -------- Encabezado ----------
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 10, safe_pdf_text("Centinela Digital – Informe para comité / tutor"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    autor_software = "Software desarrollado por Prof. Anderson Díaz Pérez (Doctor en Bioética y Salud Pública, especialista en IA)."
+    pdf.multi_cell(0, 5, safe_pdf_text(autor_software))
     pdf.ln(4)
 
-    pdf.set_font("Arial", "I", 9)
-    pdf.cell(
-        0,
-        5,
-        f"Software desarrollado por el Prof. Anderson Díaz Pérez – Informe generado el {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        ln=True,
-    )
-    pdf.ln(4)
+    # -------- Datos básicos del caso ----------
+    rol = case_data.get("rol", "No especificado")
+    tipo_producto = case_data.get("tipo_producto", "No especificado")
+    archivo = case_data.get("file_name") or "Texto pegado"
 
-    # 1. Datos básicos
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 6, "1. Información básica del caso", ln=True)
-    pdf.set_font("Arial", "", 11)
-    safe_multicell(pdf, f"Rol de quien entrega el trabajo: {case_data['rol']}")
-    safe_multicell(pdf, f"Tipo de producto: {case_data['tipo_producto']}")
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("1. Información básica del caso"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Rol de quien entrega el trabajo: {rol}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Tipo de producto: {tipo_producto}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Fuente del texto analizado: {archivo}"))
+    pdf.ln(3)
+
+    # -------- Resultado global de riesgo ----------
+    riesgo_global = analysis.get("riesgo_global", 0)
+    nivel_global = analysis.get("nivel_global", "NO DISPONIBLE")
+    sentimiento = analysis.get("sentimiento", "neutro")
+    num_evidencias = analysis.get("num_evidencias", 0)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("2. Resultado global de la evaluación"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Riesgo global (0–100): {riesgo_global}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Nivel de riesgo global: {nivel_global.upper()}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Sentimiento estimado del texto (IA): {sentimiento}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Número de evidencias marcadas en el primer filtro: {num_evidencias}"))
+    pdf.ln(3)
+
+    # -------- Red flags ----------
+    red_flags = analysis.get("red_flags", []) or []
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("3. Principales red flags (alertas)"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    if red_flags:
+        for rf in red_flags:
+            pdf.multi_cell(0, 5, safe_pdf_text(f"- {rf}"))
+    else:
+        pdf.multi_cell(0, 5, safe_pdf_text("- No se identificaron red flags relevantes."))
+    pdf.ln(3)
+
+    # -------- Acciones de mitigación ----------
+    acciones = analysis.get("acciones", []) or []
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("4. Acciones sugeridas / mitigación"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    if acciones:
+        for ac in acciones:
+            pdf.multi_cell(0, 5, safe_pdf_text(f"- {ac}"))
+    else:
+        pdf.multi_cell(0, 5, safe_pdf_text("- A la fecha, no se sugieren acciones específicas."))
+    pdf.ln(3)
+
+    # -------- KPIs / insights clave ----------
+    kpis = analysis.get("kpis", []) or []
+    insights = analysis.get("insights", []) or []
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("5. KPIs e insights para seguimiento"), ln=1)
+
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.multi_cell(0, 5, safe_pdf_text("KPIs sugeridos:"))
+    pdf.set_font("Helvetica", "", 10)
+    for k in kpis:
+        pdf.multi_cell(0, 5, safe_pdf_text(f"- {k}"))
+
     pdf.ln(2)
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.multi_cell(0, 5, safe_pdf_text("Insights clave del caso:"))
+    pdf.set_font("Helvetica", "", 10)
+    for ins in insights:
+        pdf.multi_cell(0, 5, safe_pdf_text(f"- {ins}"))
+    pdf.ln(3)
 
-    # 2. Evidencias
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 6, "2. Evidencias marcadas por el revisor", ln=True)
-    pdf.set_font("Arial", "", 11)
-    for key, val in case_data["evidencias"].items():
-        label = key.replace("_", " ").capitalize()
-        safe_multicell(pdf, f"- {label}: {'Sí' if val else 'No'}")
-    pdf.ln(2)
+    # -------- Síntesis narrativa (IA) ----------
+    narrativa = analysis.get("narrativa", "")
 
-    # 3. Matriz de riesgo
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 6, "3. Matriz de riesgo sintética", ln=True)
-    pdf.set_font("Arial", "", 11)
-    for _, row in risk_df.iterrows():
-        safe_multicell(
-            pdf,
-            f"- {row['dimension']}: puntaje {row['riesgo']} (nivel {row['nivel']})",
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("6. Síntesis narrativa del caso (IA)"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    if narrativa:
+        pdf.multi_cell(0, 5, safe_pdf_text(narrativa))
+    else:
+        pdf.multi_cell(
+            0,
+            5,
+            safe_pdf_text(
+                "La síntesis narrativa automática no está disponible para este caso "
+                "(texto muy corto o IA no configurada)."
+            ),
         )
-    pdf.ln(2)
 
-    # 4. Análisis IA
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 6, "4. Análisis automatizado (IA + reglas)", ln=True)
-    pdf.set_font("Arial", "", 11)
-    safe_multicell(
-        pdf,
-        f"Nivel de riesgo global estimado: {analysis['overall_risk_level'].upper()} "
-        f"({analysis['overall_risk_score']} / 100).",
-    )
-    safe_multicell(
-        pdf,
-        f"Sentimiento global del texto: {analysis['sentiment_label']} "
-        f"(score {analysis['sentiment_score']}).",
-    )
-    pdf.ln(1)
-
-    if analysis.get("gpt_red_flags"):
-        pdf.set_font("Arial", "B", 11)
-        pdf.cell(0, 6, "Principales alertas (red flags) detectadas:", ln=True)
-        pdf.set_font("Arial", "", 11)
-        for rf in analysis["gpt_red_flags"]:
-            safe_multicell(pdf, f"- {rf}")
-        pdf.ln(1)
-
-    if analysis.get("mitigation_actions"):
-        pdf.set_font("Arial", "B", 11)
-        pdf.cell(0, 6, "Acciones sugeridas de mitigación y acompañamiento:", ln=True)
-        pdf.set_font("Arial", "", 11)
-        for ac in analysis["mitigation_actions"]:
-            safe_multicell(pdf, f"- {ac}")
-        pdf.ln(1)
-
-    if analysis.get("kpis"):
-        pdf.set_font("Arial", "B", 11)
-        pdf.cell(0, 6, "KPIs propuestos para seguimiento institucional:", ln=True)
-        pdf.set_font("Arial", "", 11)
-        for k in analysis["kpis"]:
-            safe_multicell(pdf, f"- {k}")
-        pdf.ln(1)
-
-    if analysis.get("insights"):
-        pdf.set_font("Arial", "B", 11)
-        pdf.cell(0, 6, "Insights clave para el comité / coordinación:", ln=True)
-        pdf.set_font("Arial", "", 11)
-        for ins in analysis["insights"]:
-            safe_multicell(pdf, f"- {ins}")
-        pdf.ln(1)
-
-    if analysis.get("short_narrative"):
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 6, "5. Síntesis narrativa del caso", ln=True)
-        pdf.set_font("Arial", "", 11)
-        safe_multicell(pdf, analysis["short_narrative"])
-        pdf.ln(2)
-
-    # 6. Fragmento del texto
-    if case_data.get("texto") and len(case_data["texto"].strip()) > 0:
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 6, "6. Fragmento del texto analizado (extracto)", ln=True)
-        pdf.set_font("Arial", "", 10)
-        safe_multicell(pdf, case_data["texto"][:2000])
-
-    buffer = io.BytesIO()
-    pdf.output(buffer)
-    return buffer.getvalue()
-
+    # Devolver bytes del PDF
+    pdf_bytes = pdf.output(dest="S").encode("latin-1")
+    return pdf_bytes
 
 def extract_text_from_file(uploaded_file) -> str:
     """Extrae texto desde PDF / DOCX / TXT."""

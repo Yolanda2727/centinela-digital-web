@@ -8,19 +8,20 @@ import streamlit as st
 from fpdf import FPDF
 from openai import OpenAI
 
-# -------------------------------------------------------------------
-# Configuración de OpenAI
-# -------------------------------------------------------------------
+# ============================================================
+# CONFIGURACIÓN OPENAI
+# ============================================================
 try:
-    client = OpenAI()  # usa la API key definida en st.secrets["OPENAI_API_KEY"]
+    # Usa la variable de entorno OPENAI_API_KEY (en Streamlit Cloud: st.secrets)
+    client = OpenAI()
     OPENAI_OK = True
 except Exception:
     client = None
     OPENAI_OK = False
 
-# -------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------
+# ============================================================
+# CONSTANTES Y HELPERS
+# ============================================================
 PRODUCT_OPTIONS = [
     "Ensayo",
     "Artículo científico",
@@ -38,28 +39,37 @@ def yn(label: str, key: str) -> int:
     return 1 if choice == "Sí" else 0
 
 
-def wrap_text(text: str, width: int = 100) -> str:
-    """
-    Inserta saltos de línea en palabras muy largas (URLs, DOIs, etc.)
-    para evitar el error de FPDF: 'Not enough horizontal space'.
-    """
-    import textwrap
+# ---------- extracción de texto de archivos -----------------
+def extract_text_from_file(uploaded_file) -> str:
+    """Extrae texto desde PDF / DOCX / TXT."""
+    if uploaded_file is None:
+        return ""
+    import os
 
-    tokens = text.split(" ")
-    new_tokens = []
-    for t in tokens:
-        if len(t) > width:
-            new_tokens.extend(textwrap.wrap(t, width))
-        else:
-            new_tokens.append(t)
-    safe = " ".join(new_tokens)
-    return "\n".join(textwrap.wrap(safe, width))
+    suffix = os.path.splitext(uploaded_file.name)[1].lower()
+
+    if suffix == ".txt":
+        return uploaded_file.read().decode("utf-8", errors="ignore")
+
+    if suffix in [".docx", ".doc"]:
+        from docx import Document
+
+        doc = Document(uploaded_file)
+        return "\n".join(p.text for p in doc.paragraphs)
+
+    if suffix == ".pdf":
+        import PyPDF2
+
+        reader = PyPDF2.PdfReader(uploaded_file)
+        text_parts = []
+        for page in reader.pages:
+            text_parts.append(page.extract_text() or "")
+        return "\n".join(text_parts)
+
+    return ""
 
 
-def safe_multicell(pdf: FPDF, text: str, h: float = 6):
-    pdf.multi_cell(0, h, wrap_text(text))
-
-
+# ---------- matriz de riesgo -------------------------------
 def build_risk_matrix(evidencias: dict) -> pd.DataFrame:
     """Construye matriz de riesgo por dimensiones a partir de las evidencias."""
     dims = {
@@ -97,6 +107,190 @@ def overall_level(score: int) -> str:
     return "SIN ALERTAS"
 
 
+# ============================================================
+# UTILIDADES PARA PDF (evitar errores de FPDF)
+# ============================================================
+def _break_long_words(text: str, max_len: int = 60) -> str:
+    """
+    Evita el error 'Not enough horizontal space...' partiendo palabras muy largas
+    (por ejemplo, URLs) en trozos manejables.
+    """
+    words = text.split(" ")
+    pieces = []
+
+    for w in words:
+        if len(w) <= max_len:
+            pieces.append(w)
+        else:
+            for i in range(0, len(w), max_len):
+                pieces.append(w[i : i + max_len])
+
+    return " ".join(pieces)
+
+
+def safe_pdf_text(text: str) -> str:
+    """
+    1) Sustituye caracteres Unicode problemáticos.
+    2) Rompe palabras larguísimas.
+    3) Fuerza compatibilidad latin-1 (FPDF clásico).
+    """
+    if not text:
+        return ""
+
+    replacements = {
+        "–": "-",
+        "—": "-",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "…": "...",
+        "•": "-",
+        "º": "o",
+        "ª": "a",
+        "→": "->",
+        "°": " grados",
+        "\u00a0": " ",  # espacio no separable
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    text = _break_long_words(text, max_len=60)
+    text = text.encode("latin-1", "replace").decode("latin-1")
+    return text
+
+
+def build_pdf_report(case_data: dict, analysis: dict) -> bytes:
+    """
+    Genera un informe PDF corto para comité / tutor.
+    Usa safe_pdf_text() para evitar problemas de Unicode y palabras largas.
+    """
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # -------- Encabezado ----------
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 10, safe_pdf_text("Centinela Digital – Informe para comité / tutor"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    autor_software = (
+        "Software desarrollado por Prof. Anderson Díaz Pérez "
+        "(Doctor en Bioética y Salud Pública, especialista en IA)."
+    )
+    pdf.multi_cell(0, 5, safe_pdf_text(autor_software))
+    pdf.ln(4)
+
+    # -------- Datos básicos del caso ----------
+    rol = case_data.get("rol", "No especificado")
+    tipo_producto = case_data.get("tipo_producto", "No especificado")
+    archivo = case_data.get("file_name") or "Texto pegado"
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("1. Información básica del caso"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Rol de quien entrega el trabajo: {rol}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Tipo de producto: {tipo_producto}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Fuente del texto analizado: {archivo}"))
+    pdf.ln(3)
+
+    # -------- Resultado global de riesgo ----------
+    riesgo_global = analysis.get("riesgo_global", 0)
+    nivel_global = analysis.get("nivel_global", "NO DISPONIBLE")
+    sentimiento = analysis.get("sentimiento", "neutro")
+    num_evidencias = analysis.get("num_evidencias", 0)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("2. Resultado global de la evaluación"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Riesgo global (0–100): {riesgo_global}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Nivel de riesgo global: {nivel_global.upper()}"))
+    pdf.multi_cell(0, 5, safe_pdf_text(f"Sentimiento estimado del texto (IA): {sentimiento}"))
+    pdf.multi_cell(
+        0,
+        5,
+        safe_pdf_text(f"Número de evidencias marcadas en el primer filtro: {num_evidencias}"),
+    )
+    pdf.ln(3)
+
+    # -------- Red flags ----------
+    red_flags = analysis.get("red_flags", []) or []
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("3. Principales red flags (alertas)"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    if red_flags:
+        for rf in red_flags:
+            pdf.multi_cell(0, 5, safe_pdf_text(f"- {rf}"))
+    else:
+        pdf.multi_cell(0, 5, safe_pdf_text("- No se identificaron red flags relevantes."))
+    pdf.ln(3)
+
+    # -------- Acciones de mitigación ----------
+    acciones = analysis.get("acciones", []) or []
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("4. Acciones sugeridas / mitigación"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    if acciones:
+        for ac in acciones:
+            pdf.multi_cell(0, 5, safe_pdf_text(f"- {ac}"))
+    else:
+        pdf.multi_cell(0, 5, safe_pdf_text("- A la fecha, no se sugieren acciones específicas."))
+    pdf.ln(3)
+
+    # -------- KPIs / insights clave ----------
+    kpis = analysis.get("kpis", []) or []
+    insights = analysis.get("insights", []) or []
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("5. KPIs e insights para seguimiento"), ln=1)
+
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.multi_cell(0, 5, safe_pdf_text("KPIs sugeridos:"))
+    pdf.set_font("Helvetica", "", 10)
+    for k in kpis:
+        pdf.multi_cell(0, 5, safe_pdf_text(f"- {k}"))
+
+    pdf.ln(2)
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.multi_cell(0, 5, safe_pdf_text("Insights clave del caso:"))
+    pdf.set_font("Helvetica", "", 10)
+    for ins in insights:
+        pdf.multi_cell(0, 5, safe_pdf_text(f"- {ins}"))
+    pdf.ln(3)
+
+    # -------- Síntesis narrativa (IA) ----------
+    narrativa = analysis.get("narrativa", "")
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, safe_pdf_text("6. Síntesis narrativa del caso (IA)"), ln=1)
+
+    pdf.set_font("Helvetica", "", 10)
+    if narrativa:
+        pdf.multi_cell(0, 5, safe_pdf_text(narrativa))
+    else:
+        pdf.multi_cell(
+            0,
+            5,
+            safe_pdf_text(
+                "La síntesis narrativa automática no está disponible para este caso "
+                "(texto muy corto o IA no configurada)."
+            ),
+        )
+
+    # Devolver bytes del PDF
+    pdf_bytes = pdf.output(dest="S").encode("latin-1")
+    return pdf_bytes
+
+
+# ============================================================
+# LLAMADA A GPT PARA ANÁLISIS AVANZADO
+# ============================================================
 def call_gpt_analysis(texto: str, rol: str, tipo_producto: str, evidencias: dict) -> dict:
     """Llama a OpenAI (ChatGPT) para análisis avanzado del caso."""
     if not OPENAI_OK:
@@ -186,211 +380,10 @@ Devuelve EXCLUSIVAMENTE un JSON válido con esta estructura:
         }
     return data
 
-from fpdf import FPDF
 
-# --- Utilidades para texto seguro en PDF ------------------------------------
-
-def _break_long_words(text: str, max_len: int = 60) -> str:
-    """
-    Evita el error 'Not enough horizontal space...' partiendo palabras muy largas
-    (p.ej. URLs) en trozos manejables.
-    """
-    words = text.split(" ")
-    pieces = []
-
-    for w in words:
-        if len(w) <= max_len:
-            pieces.append(w)
-        else:
-            # Cortar palabras largas en segmentos
-            for i in range(0, len(w), max_len):
-                pieces.append(w[i:i + max_len])
-
-    return " ".join(pieces)
-
-def safe_pdf_text(text: str) -> str:
-    """
-    1) Sustituye caracteres Unicode problemáticos (–, “ ”, …).
-    2) Rompe palabras larguísimas.
-    3) Garantiza que el resultado pueda escribirse en latin-1.
-    """
-    if not text:
-        return ""
-
-    # Sustituir caracteres frecuentes en español académico
-    replacements = {
-        "–": "-", "—": "-",
-        "“": '"', "”": '"',
-        "‘": "'", "’": "'",
-        "…": "...",
-        "•": "-",
-        "º": "o", "ª": "a",
-        "→": "->",
-        "°": " grados",
-        "\u00a0": " ",  # espacio no separable
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    # Romper palabras muy largas (URLs, IDs, etc.)
-    text = _break_long_words(text, max_len=60)
-
-    # Forzar compatibilidad latin-1, sustituyendo lo que quede raro por '?'
-    text = text.encode("latin-1", "replace").decode("latin-1")
-    return text
-
-def build_pdf_report(case_data: dict, analysis: dict) -> bytes:
-    """
-    Genera un informe PDF corto para comité / tutor.
-    Usa safe_pdf_text() para evitar problemas de Unicode y palabras largas.
-    """
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-
-    # -------- Encabezado ----------
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 10, safe_pdf_text("Centinela Digital – Informe para comité / tutor"), ln=1)
-
-    pdf.set_font("Helvetica", "", 10)
-    autor_software = "Software desarrollado por Prof. Anderson Díaz Pérez (Doctor en Bioética y Salud Pública, especialista en IA)."
-    pdf.multi_cell(0, 5, safe_pdf_text(autor_software))
-    pdf.ln(4)
-
-    # -------- Datos básicos del caso ----------
-    rol = case_data.get("rol", "No especificado")
-    tipo_producto = case_data.get("tipo_producto", "No especificado")
-    archivo = case_data.get("file_name") or "Texto pegado"
-
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, safe_pdf_text("1. Información básica del caso"), ln=1)
-
-    pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 5, safe_pdf_text(f"Rol de quien entrega el trabajo: {rol}"))
-    pdf.multi_cell(0, 5, safe_pdf_text(f"Tipo de producto: {tipo_producto}"))
-    pdf.multi_cell(0, 5, safe_pdf_text(f"Fuente del texto analizado: {archivo}"))
-    pdf.ln(3)
-
-    # -------- Resultado global de riesgo ----------
-    riesgo_global = analysis.get("riesgo_global", 0)
-    nivel_global = analysis.get("nivel_global", "NO DISPONIBLE")
-    sentimiento = analysis.get("sentimiento", "neutro")
-    num_evidencias = analysis.get("num_evidencias", 0)
-
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, safe_pdf_text("2. Resultado global de la evaluación"), ln=1)
-
-    pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 5, safe_pdf_text(f"Riesgo global (0–100): {riesgo_global}"))
-    pdf.multi_cell(0, 5, safe_pdf_text(f"Nivel de riesgo global: {nivel_global.upper()}"))
-    pdf.multi_cell(0, 5, safe_pdf_text(f"Sentimiento estimado del texto (IA): {sentimiento}"))
-    pdf.multi_cell(0, 5, safe_pdf_text(f"Número de evidencias marcadas en el primer filtro: {num_evidencias}"))
-    pdf.ln(3)
-
-    # -------- Red flags ----------
-    red_flags = analysis.get("red_flags", []) or []
-
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, safe_pdf_text("3. Principales red flags (alertas)"), ln=1)
-
-    pdf.set_font("Helvetica", "", 10)
-    if red_flags:
-        for rf in red_flags:
-            pdf.multi_cell(0, 5, safe_pdf_text(f"- {rf}"))
-    else:
-        pdf.multi_cell(0, 5, safe_pdf_text("- No se identificaron red flags relevantes."))
-    pdf.ln(3)
-
-    # -------- Acciones de mitigación ----------
-    acciones = analysis.get("acciones", []) or []
-
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, safe_pdf_text("4. Acciones sugeridas / mitigación"), ln=1)
-
-    pdf.set_font("Helvetica", "", 10)
-    if acciones:
-        for ac in acciones:
-            pdf.multi_cell(0, 5, safe_pdf_text(f"- {ac}"))
-    else:
-        pdf.multi_cell(0, 5, safe_pdf_text("- A la fecha, no se sugieren acciones específicas."))
-    pdf.ln(3)
-
-    # -------- KPIs / insights clave ----------
-    kpis = analysis.get("kpis", []) or []
-    insights = analysis.get("insights", []) or []
-
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, safe_pdf_text("5. KPIs e insights para seguimiento"), ln=1)
-
-    pdf.set_font("Helvetica", "I", 10)
-    pdf.multi_cell(0, 5, safe_pdf_text("KPIs sugeridos:"))
-    pdf.set_font("Helvetica", "", 10)
-    for k in kpis:
-        pdf.multi_cell(0, 5, safe_pdf_text(f"- {k}"))
-
-    pdf.ln(2)
-    pdf.set_font("Helvetica", "I", 10)
-    pdf.multi_cell(0, 5, safe_pdf_text("Insights clave del caso:"))
-    pdf.set_font("Helvetica", "", 10)
-    for ins in insights:
-        pdf.multi_cell(0, 5, safe_pdf_text(f"- {ins}"))
-    pdf.ln(3)
-
-    # -------- Síntesis narrativa (IA) ----------
-    narrativa = analysis.get("narrativa", "")
-
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, safe_pdf_text("6. Síntesis narrativa del caso (IA)"), ln=1)
-
-    pdf.set_font("Helvetica", "", 10)
-    if narrativa:
-        pdf.multi_cell(0, 5, safe_pdf_text(narrativa))
-    else:
-        pdf.multi_cell(
-            0,
-            5,
-            safe_pdf_text(
-                "La síntesis narrativa automática no está disponible para este caso "
-                "(texto muy corto o IA no configurada)."
-            ),
-        )
-
-    # Devolver bytes del PDF
-    pdf_bytes = pdf.output(dest="S").encode("latin-1")
-    return pdf_bytes
-
-def extract_text_from_file(uploaded_file) -> str:
-    """Extrae texto desde PDF / DOCX / TXT."""
-    if uploaded_file is None:
-        return ""
-    import os
-
-    suffix = os.path.splitext(uploaded_file.name)[1].lower()
-
-    if suffix in [".txt"]:
-        return uploaded_file.read().decode("utf-8", errors="ignore")
-
-    if suffix in [".docx", ".doc"]:
-        from docx import Document
-
-        doc = Document(uploaded_file)
-        return "\n".join(p.text for p in doc.paragraphs)
-
-    if suffix == ".pdf":
-        import PyPDF2
-
-        reader = PyPDF2.PdfReader(uploaded_file)
-        text_parts = []
-        for page in reader.pages:
-            text_parts.append(page.extract_text() or "")
-        return "\n".join(text_parts)
-
-    return ""
-
-
-# -------------------------------------------------------------------
-# Config general de Streamlit
-# -------------------------------------------------------------------
+# ============================================================
+# CONFIG GENERAL DE STREAMLIT
+# ============================================================
 st.set_page_config(
     page_title="Centinela Digital – Integridad académica con IA",
     page_icon="🛡️",
@@ -406,7 +399,7 @@ st.sidebar.markdown(
 **Monitor de integridad académica y científica con apoyo de IA.**
 
 Software desarrollado por **Prof. Anderson Díaz Pérez**  
-(Doctor en Bioética, Doctor en Salud Pública, Magister en Ciencias Basicas Biomedicas, Especialista en IA).
+(Doctor en Bioética, Doctor en Salud Pública, Magister en Ciencias Básicas Biomédicas, Especialista en IA).
 
 Versión web inicial, orientada a:
 - Docentes y tutores.
@@ -418,7 +411,7 @@ Versión web inicial, orientada a:
 if not OPENAI_OK:
     st.sidebar.warning(
         "No se detectó la configuración de la API de OpenAI. "
-        "Configura tu clave en `st.secrets['OPENAI_API_KEY']` en Streamlit Cloud."
+        "Configura tu clave en `OPENAI_API_KEY` o en `st.secrets`."
     )
 
 tabs = st.tabs(
@@ -429,13 +422,13 @@ tabs = st.tabs(
     ]
 )
 
-# -------------------------------------------------------------------
+# ============================================================
 # TAB 1 – ANALIZAR CASO
-# -------------------------------------------------------------------
+# ============================================================
 with tabs[0]:
     st.title("Centinela Digital")
     st.markdown(
-        "### Monitorizando la integridad académica y científica con apoyo de IA\n"      
+        "### Monitorizando la integridad académica y científica con apoyo de IA\n"
     )
 
     with st.form("form_caso"):
@@ -471,7 +464,7 @@ with tabs[0]:
             height=200,
         )
 
-        texto_final = texto_manual.strip() or texto_archivo.strip()
+        texto_final = (texto_manual or "").strip() or (texto_archivo or "").strip()
 
         st.subheader("3. Evidencias estructuradas (primer filtro)")
         st.markdown(
@@ -519,25 +512,41 @@ with tabs[0]:
             )
         else:
             with st.spinner("Analizando caso con reglas + IA, por favor espera..."):
+                # Reglas (matriz de riesgo)
                 risk_df = build_risk_matrix(evidencias)
                 base_score = risk_score_from_matrix(risk_df)
 
+                # IA (OpenAI)
                 gpt_result = call_gpt_analysis(texto_final, rol, tipo_producto, evidencias)
 
                 overall_score = max(base_score, gpt_result.get("overall_risk_score", 0))
                 level = overall_level(overall_score)
 
+                # Diccionario completo para la interfaz
                 analysis = {
-                    **gpt_result,
                     "overall_risk_score": overall_score,
                     "overall_risk_level": level,
+                    **gpt_result,
                 }
 
+                # Datos básicos del caso para el PDF
                 case_data = {
                     "rol": rol,
                     "tipo_producto": tipo_producto,
-                    "evidencias": evidencias,
-                    "texto": texto_final,
+                    "file_name": uploaded.name if uploaded else None,
+                }
+
+                # Datos específicos que usa el PDF
+                report_data = {
+                    "riesgo_global": overall_score,
+                    "nivel_global": level,
+                    "sentimiento": gpt_result.get("sentiment_label", "N/A"),
+                    "num_evidencias": sum(evidencias.values()),
+                    "red_flags": gpt_result.get("gpt_red_flags", []),
+                    "acciones": gpt_result.get("mitigation_actions", []),
+                    "kpis": gpt_result.get("kpis", []),
+                    "insights": gpt_result.get("insights", []),
+                    "narrativa": gpt_result.get("short_narrative", ""),
                 }
 
                 # Guardar en historial de la sesión
@@ -553,12 +562,13 @@ with tabs[0]:
 
             st.success(f"Análisis completado. Nivel de riesgo global: **{level}**.")
 
-            # KPIs rápidos
+            # ----- KPIs rápidos -----
             col_a, col_b, col_c = st.columns(3)
             col_a.metric("Riesgo global (0–100)", overall_score)
             col_b.metric("Sentimiento (IA)", gpt_result.get("sentiment_label", "N/A"))
             col_c.metric("Evidencias marcadas", sum(evidencias.values()))
 
+            # ----- Matriz de riesgo -----
             st.markdown("### Matriz de riesgo por dimensión")
             st.dataframe(risk_df, use_container_width=True)
 
@@ -575,6 +585,7 @@ with tabs[0]:
             )
             st.altair_chart(chart, use_container_width=True)
 
+            # ----- Insights, red flags y mitigación -----
             st.markdown("### Principales insights y red flags")
             col1, col2 = st.columns(2)
 
@@ -609,11 +620,12 @@ with tabs[0]:
                 st.markdown("### Síntesis narrativa del caso (IA)")
                 st.write(analysis["short_narrative"])
 
-            # Botón para informe PDF
+            # ----- Informe PDF -----
             st.markdown("---")
             st.subheader("Informes automáticos para comité / tutor")
             try:
-                pdf_bytes = build_pdf_report(case_data, analysis, risk_df)
+                # 🔴 AQUÍ ESTABA EL ERROR ANTES: se pasaban 3 argumentos.
+                pdf_bytes = build_pdf_report(case_data, report_data)
                 st.download_button(
                     label="📄 Descargar informe PDF del caso",
                     data=pdf_bytes,
@@ -626,9 +638,9 @@ with tabs[0]:
                     f"Detalle técnico: {e}"
                 )
 
-# -------------------------------------------------------------------
-# TAB 2 – ESTADO ACTUAL Y ROADMAP
-# -------------------------------------------------------------------
+# ============================================================
+# TAB 2 – ESTADO ACTUAL Y PRÓXIMOS PASOS
+# ============================================================
 with tabs[1]:
     st.header("Estado actual y próximos pasos del proyecto")
 
@@ -685,9 +697,9 @@ Esta es una **versión inicial estable** de Centinela Digital, pensada para:
     else:
         st.info("Aún no hay casos analizados en esta sesión. Usa la pestaña **Analizar un caso**.")
 
-# -------------------------------------------------------------------
+# ============================================================
 # TAB 3 – PANEL PARA COMITÉS Y PROGRAMAS
-# -------------------------------------------------------------------
+# ============================================================
 with tabs[2]:
     st.header("Panel de control para comités de ética y programas académicos")
 

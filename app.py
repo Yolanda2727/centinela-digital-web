@@ -1,448 +1,653 @@
 # app.py
-# Centinela Digital Web
-# Monitorizando la integridad académica y científica con apoyo de IA
-
-import os
+import io
 import json
-import re
-from typing import Dict, Any, List
+from datetime import datetime
 
-import streamlit as st
-import pandas as pd
 import altair as alt
+import numpy as np
+import pandas as pd
+import streamlit as st
+from fpdf import FPDF
+from PyPDF2 import PdfReader
+from docx import Document
 
-# ============================================
-# CONFIGURACIÓN INICIAL
-# ============================================
+# --- IA de OpenAI (modo clásico para compatibilidad) ---
+import openai
 
+OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
+if OPENAI_KEY:
+    openai.api_key = OPENAI_KEY
+
+# -------------------------------------------------------------------
+# CONFIGURACIÓN GENERAL DE LA PÁGINA
+# -------------------------------------------------------------------
 st.set_page_config(
-    page_title="Centinela Digital",
+    page_title="Centinela Digital – Integridad académica y científica",
     page_icon="🛡️",
     layout="wide",
 )
 
-st.sidebar.title("🛡️ Centinela Digital")
-st.sidebar.markdown(
+# -------------------------------------------------------------------
+# ESTILOS BÁSICOS
+# -------------------------------------------------------------------
+st.markdown(
     """
-**Monitorizando la integridad académica y científica con apoyo de IA.**
-
-**Autor del software:**  
-Prof. **Anderson Díaz Pérez**  
-(Bioeticista e investigador en integridad científica).
-
-Versión web inicial (beta).
-"""
+    <style>
+    .small-text {font-size: 0.8rem; color: #aaaaaa;}
+    .risk-high {color:#ff4b4b; font-weight:bold;}
+    .risk-medium {color:#ffb000; font-weight:bold;}
+    .risk-low {color:#21c55d; font-weight:bold;}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-# --- OpenAI client (opcional) ---
-
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None  # por si la librería no está instalada
-
-
-def get_openai_client():
-    """Intenta crear el cliente de OpenAI usando secrets o variables de entorno."""
-    if OpenAI is None:
-        return None
-
-    api_key = None
-    if "OPENAI_API_KEY" in st.secrets:
-        api_key = st.secrets["OPENAI_API_KEY"]
-    else:
-        api_key = os.getenv("OPENAI_API_KEY")
-
-    if not api_key:
-        return None
-
-    return OpenAI(api_key=api_key)
-
-
-openai_client = get_openai_client()
-HAS_OPENAI = openai_client is not None
-
-if not HAS_OPENAI:
-    st.sidebar.info(
-        "👉 Para activar el análisis avanzado con ChatGPT, "
-        "configura `OPENAI_API_KEY` en **Secrets** de Streamlit."
-    )
-else:
-    st.sidebar.success("🔑 Análisis avanzado con OpenAI activado.")
-
-
-# ============================================
-# 2. FUNCIONES DE ANÁLISIS
-# ============================================
-
-def limpiar_json_posible(texto: str) -> str:
-    """Elimina ```json ... ``` si el modelo devuelve el JSON en un bloque de código."""
-    texto = texto.strip()
-    texto = re.sub(r"^```json", "", texto, flags=re.IGNORECASE).strip()
-    texto = re.sub(r"^```", "", texto).strip()
-    texto = re.sub(r"```$", "", texto).strip()
-    return texto
-
-
-def analizar_texto_openai(texto: str, rol: str, tipo_producto: str) -> Dict[str, Any]:
-    """Análisis profundo usando ChatGPT vía OpenAI."""
-    system_msg = (
-        "Eres un experto en bioética, integridad académica e investigación. "
-        "Evalúas trabajos académicos y científicos, detectas posibles usos indebidos de IA, "
-        "plagio, fabricación/falsificación de datos y problemas éticos. "
-        "SIEMPRE devuelves ÚNICAMENTE un JSON válido en UTF-8, sin comentarios adicionales."
-    )
-
-    user_prompt = f"""
-Analiza el siguiente texto académico/científico.
-
-Contexto:
-- Rol de quien entrega el trabajo: {rol}
-- Tipo de producto: {tipo_producto}
-
-Tareas:
-
-1. Análisis de sentimiento general del fragmento (positivo, neutral o negativo).
-2. Nivel de riesgo de integridad académica en una escala cualitativa (bajo, medio, alto).
-3. Detección de **red flags** (alertas) relacionadas con:
-   - posible uso indebido de IA,
-   - plagio o parafraseo pobre,
-   - fabricación o manipulación de datos,
-   - referencias inverificables o sospechosas,
-   - incoherencias metodológicas o éticas.
-4. Cálculo de algunos **KPIs** (indicadores clave) útiles para el docente, semillero o comité, por ejemplo:
-   - porcentaje estimado de riesgo de uso indebido de IA,
-   - claridad argumentativa,
-   - coherencia entre objetivos y resultados,
-   - solidez ética/metodológica.
-5. Formulación de **insights principales** (2–5 frases cortas).
-6. Propuestas de **recomendaciones prácticas** para mitigar los riesgos identificados.
-
-Devuelve ÚNICA Y EXCLUSIVAMENTE un JSON con la siguiente estructura:
-
-{{
-  "sentiment": "positivo|neutral|negativo",
-  "sentiment_score": float (0 a 1),
-  "risk_level": "bajo|medio|alto",
-  "num_words": int,
-  "red_flags": ["lista", "de", "frases"],
-  "kpis": [
-    {{"nombre": "texto", "valor": float}},
-    {{"nombre": "texto", "valor": float}}
-  ],
-  "insights": ["frase 1", "frase 2"],
-  "recomendaciones": ["recomendación 1", "recomendación 2"]
-}}
-
-Texto a analizar:
-\"\"\"{texto}\"\"\"
-"""
-
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-
-    content = response.choices[0].message.content or ""
-    content = limpiar_json_posible(content)
-
+# -------------------------------------------------------------------
+# UTILIDADES DE EXTRACCIÓN DE TEXTO
+# -------------------------------------------------------------------
+def extract_text_from_pdf(file) -> str:
     try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        # Si algo sale mal, lanzamos excepción para que el caller use un fallback local
-        raise ValueError("La respuesta de OpenAI no fue un JSON válido.")
+        reader = PdfReader(file)
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(pages)
+    except Exception as e:
+        return f"[Error al leer PDF: {e}]"
 
-    return data
+def extract_text_from_docx(file) -> str:
+    try:
+        doc = Document(file)
+        paragraphs = [p.text for p in doc.paragraphs]
+        return "\n".join(paragraphs)
+    except Exception as e:
+        return f"[Error al leer DOCX: {e}]"
 
 
-def analizar_texto_local(texto: str, rol: str, tipo_producto: str) -> Dict[str, Any]:
-    """Análisis sencillo de respaldo cuando no hay OpenAI o falla la llamada."""
-    palabras = re.findall(r"\w+", texto.lower(), flags=re.UNICODE)
-    num_words = len(palabras)
+# -------------------------------------------------------------------
+# ANÁLISIS BÁSICO (SIN IA) – RESPALDO
+# -------------------------------------------------------------------
+def fallback_basic_analysis(text: str, rol: str, tipo: str) -> dict:
+    """Análisis mínimo cuando no hay API key o la IA falla."""
+    n_chars = len(text)
+    n_words = len(text.split())
+    red_flags = []
+    lower = text.lower()
 
-    positivos = {"excelente", "claro", "coherente", "riguroso", "válido", "valido"}
-    negativos = {"confuso", "débil", "debil", "incompleto", "plagio", "copiado"}
+    if "plagio" in lower or "copy" in lower:
+        red_flags.append("Mención explícita a plagio o copia.")
+    if "chatgpt" in lower or "inteligencia artificial" in lower:
+        red_flags.append("Se menciona uso de IA en el texto.")
+    if n_words < 150:
+        red_flags.append("Texto muy corto para el tipo de producto declarado.")
 
-    score = 0
-    for p in palabras:
-        if p in positivos:
-            score += 1
-        if p in negativos:
-            score -= 1
+    dim_scores = {
+        "Metodológica": 40 if "método" in lower or "metodología" in lower else 25,
+        "Ética": 50 if "consentimiento" in lower or "ética" in lower else 30,
+        "Bibliográfica": 45 if "doi" in lower or "referencias" in lower else 25,
+        "Redacción / Coherencia": 55 if n_words > 200 else 30,
+        "Uso de IA / Originalidad": 60 if "chatgpt" in lower else 35,
+    }
 
-    if num_words > 0:
-        sentiment_score = max(0.0, min(1.0, 0.5 + score / (2 * num_words)))
-    else:
-        sentiment_score = 0.5
-
-    if sentiment_score > 0.6:
-        sentiment = "positivo"
-    elif sentiment_score < 0.4:
-        sentiment = "negativo"
-    else:
-        sentiment = "neutral"
-
-    # Red flags muy básicas
-    texto_lower = texto.lower()
-    red_flags: List[str] = []
-    patrones_sospechosos = [
-        "como modelo de lenguaje",
-        "como inteligencia artificial",
-        "chatgpt",
-        "gpt-",
-        "según la ia",
-        "inteligencia artificial generativa",
-    ]
-    for p in patrones_sospechosos:
-        if p in texto_lower:
-            red_flags.append(f"Referencia explícita a IA: «{p}»")
-
-    risk_level = "bajo"
-    if len(red_flags) >= 2 or sentiment == "negativo":
-        risk_level = "alto"
-    elif len(red_flags) == 1 or sentiment == "neutral":
-        risk_level = "medio"
-
-    kpis = [
-        {"nombre": "Extensión analizada (palabras)", "valor": float(num_words)},
-        {"nombre": "Índice local de sentimiento (0-1)", "valor": float(sentiment_score)},
-        {"nombre": "Número de red flags detectadas", "valor": float(len(red_flags))},
-    ]
-
-    insights = [
-        f"Análisis local sin OpenAI: sentimiento {sentiment} con puntaje {sentiment_score:.2f}.",
-        f"Se detectaron {len(red_flags)} posibles alertas en el texto.",
-    ]
-
-    recomendaciones = [
-        "Revisar manualmente la coherencia y las referencias del texto.",
-        "Solicitar al estudiante una reflexión sobre el proceso de elaboración y las herramientas utilizadas.",
-    ]
+    resumen = (
+        "Análisis básico sin IA de OpenAI. Se revisó longitud, presencia de términos "
+        "clave y posibles alertas mínimas sobre plagio, ética y uso de IA."
+    )
 
     return {
-        "sentiment": sentiment,
-        "sentiment_score": sentiment_score,
-        "risk_level": risk_level,
-        "num_words": num_words,
+        "sentimiento_global": "neutral",
+        "nivel_riesgo_global": "medio",
+        "dimensiones": dim_scores,
+        "kpis": {
+            "n_palabras": n_words,
+            "n_caracteres": n_chars,
+            "n_red_flags": len(red_flags),
+        },
         "red_flags": red_flags,
-        "kpis": kpis,
-        "insights": insights,
-        "recomendaciones": recomendaciones,
+        "insights": [
+            "Se recomienda complementar el análisis con IA cuando se configure la API key.",
+            "Revisar manualmente la coherencia metodológica y la solidez de las referencias.",
+        ],
+        "recomendaciones": [
+            "Ampliar el marco teórico y las referencias actualizadas.",
+            "Incluir una sección explícita sobre consideraciones éticas.",
+        ],
+        "resumen": resumen,
     }
 
 
-def analizar_texto(texto: str, rol: str, tipo_producto: str) -> Dict[str, Any]:
-    """Coordinador: intenta usar OpenAI y, si falla, usa el análisis local."""
-    if HAS_OPENAI:
-        try:
-            return analizar_texto_openai(texto, rol, tipo_producto)
-        except Exception as e:
-            st.error(f"⚠️ Error al usar OpenAI: {e}")
-            st.info("Se utilizará el análisis local de respaldo.")
-    return analizar_texto_local(texto, rol, tipo_producto)
+# -------------------------------------------------------------------
+# ANÁLISIS CON IA DE OPENAI
+# -------------------------------------------------------------------
+def analyze_with_openai(text: str, rol: str, tipo: str) -> dict:
+    """Llama a OpenAI para un análisis profundo. Devuelve dict estructurado.
+    Si algo falla, usa fallback_basic_analysis.
+    """
 
+    if not OPENAI_KEY or not text.strip():
+        return fallback_basic_analysis(text, rol, tipo)
 
-# ============================================
-# 3. FUNCIÓN PARA MOSTRAR RESULTADOS
-# ============================================
-
-def mostrar_resultados_analisis(analisis: Dict[str, Any]) -> None:
-    st.subheader("🔎 Resultados del análisis del caso")
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Nivel de riesgo", analisis.get("risk_level", "N/D").capitalize())
-    col2.metric("Sentimiento global", analisis.get("sentiment", "N/D").capitalize())
-    col3.metric(
-        "Palabras analizadas",
-        f"{analisis.get('num_words', 0):,}".replace(",", "."),
+    system_prompt = (
+        "Eres un experto en integridad científica, bioética y análisis de textos "
+        "académicos. Analizas trabajos de estudiantes y docentes con mirada crítica "
+        "pero formativa. Responde SIEMPRE en español y SOLO con un JSON válido."
     )
 
-    # KPIs -> gráfico de barras
-    st.markdown("### 📈 KPIs clave del caso")
+    user_prompt = f"""
+Texto del trabajo (recortado si es muy largo):
+\"\"\"{text[:8000]}\"\"\"  # si es muy largo, se corta a 8000 caracteres
 
-    kpis = analisis.get("kpis", []) or []
-    df_kpis = pd.DataFrame(kpis)
+Contexto:
+- Rol de quien entrega el trabajo: {rol}
+- Tipo de producto: {tipo}
 
-    if not df_kpis.empty and "nombre" in df_kpis.columns and "valor" in df_kpis.columns:
-        df_kpis["valor"] = pd.to_numeric(df_kpis["valor"], errors="coerce")
-        df_kpis = df_kpis.dropna(subset=["valor"])
+Por favor devuelve SOLO un JSON con la siguiente estructura (sin comentarios):
 
-        if not df_kpis.empty:
-            chart = (
-                alt.Chart(df_kpis)
-                .mark_bar()
-                .encode(
-                    x=alt.X("nombre:N", sort="-y", title="Indicador"),
-                    y=alt.Y("valor:Q", title="Valor"),
-                    tooltip=["nombre", "valor"],
-                )
-                .properties(height=300)
-            )
-            st.altair_chart(chart, use_container_width=True)
-        else:
-            st.info("No hay KPIs numéricos suficientes para graficar.")
+{{
+  "sentimiento_global": "positivo | neutro | negativo",
+  "nivel_riesgo_global": "bajo | medio | alto",
+  "dimensiones": {{
+    "Metodológica": 0-100,
+    "Ética": 0-100,
+    "Bibliográfica": 0-100,
+    "Redacción / Coherencia": 0-100,
+    "Uso de IA / Originalidad": 0-100
+  }},
+  "kpis": {{
+    "n_palabras": número,
+    "n_parrafos": número,
+    "porcentaje_primera_persona": 0-100,
+    "porcentaje_citas_aproximado": 0-100
+  }},
+  "red_flags": [
+    "descripción breve de cada alerta o posible mala práctica"
+  ],
+  "insights": [
+    "insight analítico importante 1",
+    "insight analítico importante 2"
+  ],
+  "recomendaciones": [
+    "recomendación priorizada 1",
+    "recomendación priorizada 2"
+  ],
+  "resumen": "párrafo corto que resuma la situación del caso"
+}}
+
+No incluyas texto fuera del JSON.
+"""
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        raw = response["choices"][0]["message"]["content"]
+        data = json.loads(raw)
+        return data
+    except Exception as e:
+        # En caso de error: análisis básico
+        st.warning(
+            f"No se pudo completar el análisis con OpenAI ({e}). "
+            "Se usará un análisis básico local."
+        )
+        return fallback_basic_analysis(text, rol, tipo)
+
+
+# -------------------------------------------------------------------
+# GENERACIÓN DE INFORME PDF
+# -------------------------------------------------------------------
+def build_pdf_report(case_data: dict, analysis: dict) -> bytes:
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "Centinela Digital - Informe del caso", ln=True)
+
+    pdf.set_font("Arial", "", 11)
+    pdf.ln(4)
+    pdf.multi_cell(
+        0,
+        6,
+        f"Fecha de análisis: {case_data['fecha']}\n"
+        f"Rol: {case_data['rol']}\n"
+        f"Tipo de producto: {case_data['tipo_producto']}\n",
+    )
+
+    pdf.ln(2)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "1. Resumen general", ln=True)
+    pdf.set_font("Arial", "", 11)
+    pdf.multi_cell(0, 6, analysis.get("resumen", ""))
+
+    pdf.ln(2)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "2. Indicadores clave (KPIs)", ln=True)
+    pdf.set_font("Arial", "", 11)
+    for k, v in analysis.get("kpis", {}).items():
+        pdf.cell(0, 6, f"- {k}: {v}", ln=True)
+
+    pdf.ln(2)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "3. Matriz de riesgo por dimensiones", ln=True)
+    pdf.set_font("Arial", "", 11)
+    for dim, score in analysis.get("dimensiones", {}).items():
+        pdf.cell(0, 6, f"- {dim}: {score}/100", ln=True)
+
+    pdf.ln(2)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "4. Red flags / Alertas", ln=True)
+    pdf.set_font("Arial", "", 11)
+    if analysis.get("red_flags"):
+        for rf in analysis["red_flags"]:
+            pdf.multi_cell(0, 6, f"- {rf}")
     else:
-        st.info("La IA no devolvió KPIs en formato numérico para graficar.")
+        pdf.multi_cell(0, 6, "- No se identificaron red flags críticas.")
 
-    # Red flags
-    st.markdown("### 🚩 Red flags (alertas de integridad)")
+    pdf.ln(2)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "5. Recomendaciones para el comité / tutor", ln=True)
+    pdf.set_font("Arial", "", 11)
+    for rec in analysis.get("recomendaciones", []):
+        pdf.multi_cell(0, 6, f"- {rec}")
 
-    red_flags = analisis.get("red_flags", []) or []
-    if red_flags:
-        for rf in red_flags:
-            st.warning(f"• {rf}")
+    pdf.ln(2)
+    pdf.set_font("Arial", "I", 9)
+    pdf.multi_cell(
+        0,
+        5,
+        "Generado automáticamente por Centinela Digital – "
+        "Modelo de monitoreo de integridad académica y científica.\n"
+        "Autor del software: Dr. Anderson Díaz Pérez.",
+    )
+
+    return pdf.output(dest="S").encode("latin-1")
+
+
+# -------------------------------------------------------------------
+# GENERACIÓN DE INFORME WORD
+# -------------------------------------------------------------------
+def build_word_report(case_data: dict, analysis: dict) -> bytes:
+    doc = Document()
+    doc.add_heading("Centinela Digital - Informe del caso", level=1)
+
+    doc.add_paragraph(f"Fecha de análisis: {case_data['fecha']}")
+    doc.add_paragraph(f"Rol: {case_data['rol']}")
+    doc.add_paragraph(f"Tipo de producto: {case_data['tipo_producto']}")
+
+    doc.add_heading("1. Resumen general", level=2)
+    doc.add_paragraph(analysis.get("resumen", ""))
+
+    doc.add_heading("2. Indicadores clave (KPIs)", level=2)
+    for k, v in analysis.get("kpis", {}).items():
+        doc.add_paragraph(f"{k}: {v}", style="List Bullet")
+
+    doc.add_heading("3. Matriz de riesgo por dimensiones", level=2)
+    for dim, score in analysis.get("dimensiones", {}).items():
+        doc.add_paragraph(f"{dim}: {score}/100", style="List Bullet")
+
+    doc.add_heading("4. Red flags / Alertas", level=2)
+    if analysis.get("red_flags"):
+        for rf in analysis["red_flags"]:
+            doc.add_paragraph(rf, style="List Bullet")
     else:
-        st.success("No se identificaron red flags relevantes en este fragmento.")
+        doc.add_paragraph("No se identificaron red flags críticas.")
 
-    # Insights
-    st.markdown("### 💡 Principales insights")
-    insights = analisis.get("insights", []) or []
-    if insights:
-        for ins in insights:
-            st.markdown(f"- {ins}")
-    else:
-        st.write("Sin insights adicionales reportados por la IA.")
+    doc.add_heading("5. Recomendaciones", level=2)
+    for rec in analysis.get("recomendaciones", []):
+        doc.add_paragraph(rec, style="List Bullet")
 
-    # Recomendaciones
-    st.markdown("### 🛠️ Recomendaciones para mitigar riesgos")
-    recomendaciones = analisis.get("recomendaciones", []) or []
-    if recomendaciones:
-        for rec in recomendaciones:
-            st.markdown(f"- {rec}")
-    else:
-        st.write("No se reportaron recomendaciones específicas.")
+    doc.add_paragraph(
+        "\nGenerado por Centinela Digital – Autor del software: "
+        "Dr. Anderson Díaz Pérez.",
+        style=None,
+    )
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
 
 
-# ============================================
-# 4. INTERFAZ PRINCIPAL
-# ============================================
+# -------------------------------------------------------------------
+# INICIALIZACIÓN DEL HISTÓRICO EN SESIÓN
+# -------------------------------------------------------------------
+if "historial" not in st.session_state:
+    st.session_state["historial"] = []  # lista de dicts
 
+
+# -------------------------------------------------------------------
+# ENCABEZADO
+# -------------------------------------------------------------------
 st.title("🛡️ Centinela Digital")
-st.caption(
-    "Monitorizando la integridad académica y científica con apoyo de IA. "
-    "Versión mínima estable desplegada en Streamlit Cloud."
+st.subheader("Monitorizando la integridad académica y científica con apoyo de IA")
+
+st.markdown(
+    """
+    Esta es una versión inicial avanzada del sistema de monitoreo, diseñada para apoyar a 
+    profesores, semilleros, comités académicos y comités de ética en la detección preliminar 
+    de posibles inconsistencias, desviaciones o riesgos en trabajos académicos y científicos.
+    """
 )
 
-tabs = st.tabs(
-    [
-        "🔍 Analizar un caso",
-        "📊 Estado actual y próximos pasos",
-    ]
+st.markdown(
+    '<p class="small-text">Autor del software y modelo conceptual: '
+    '<strong>Dr. Anderson Díaz Pérez</strong>.</p>',
+    unsafe_allow_html=True,
 )
 
-# --------------------------------------------
-# TAB 1: Analizar un caso
-# --------------------------------------------
+tab_analisis, tab_dashboard, tab_info = st.tabs(
+    ["🔍 Analizar un caso", "📊 Dashboards y Comité de ética", "ℹ️ Estado actual y próximos pasos"]
+)
 
-with tabs[0]:
-    st.subheader("1. Información básica del caso")
+# -------------------------------------------------------------------
+# TAB 1 – ANALIZAR UN CASO
+# -------------------------------------------------------------------
+with tab_analisis:
+    st.header("1. Información básica del caso")
 
-    col_rol, col_tipo = st.columns(2)
+    col1, col2 = st.columns(2)
 
-    with col_rol:
+    with col1:
         rol = st.selectbox(
             "Rol de quien entrega el trabajo",
             [
                 "estudiante",
                 "docente-investigador",
-                "semillerista",
-                "miembro de comité",
+                "semillero de investigación",
+                "integrante de comité de ética",
                 "otro",
             ],
-            index=0,
         )
 
-    with col_tipo:
-        opciones_tipo = [
-            "Ensayo",
-            "Artículo",
-            "Tesis",
-            "Informe",
-            "Monografía",
-            "Proyecto de grado",
-            "Otro",
-        ]
-        tipo_seleccion = st.selectbox(
-            "Tipo de producto (ensayo, artículo, tesis, informe, etc.)",
-            opciones_tipo,
-            index=1,
+    with col2:
+        tipo_producto = st.selectbox(
+            "Tipo de producto",
+            [
+                "Artículo científico",
+                "Ensayo académico",
+                "Tesis / Trabajo de grado",
+                "Informe técnico",
+                "Proyecto de investigación",
+                "Otro",
+            ],
         )
-        if tipo_seleccion == "Otro":
-            tipo_otro = st.text_input("Especifique el tipo de producto")
-            tipo_producto = tipo_otro.strip() if tipo_otro.strip() else "Otro"
+
+    st.markdown("---")
+    st.header("2. Contenido del trabajo")
+
+    col_texto, col_archivo = st.columns([2, 1])
+
+    with col_texto:
+        fragmento = st.text_area(
+            "Texto del trabajo (puedes pegar un fragmento relevante)",
+            height=220,
+            placeholder="Pega aquí un fragmento del trabajo, introducción, resumen o parte crítica…",
+        )
+
+    with col_archivo:
+        st.markdown("**Carga opcional del archivo completo**")
+        uploaded_file = st.file_uploader(
+            "Formatos aceptados: PDF / Word (.docx)",
+            type=["pdf", "docx"],
+        )
+        extra_text = ""
+        if uploaded_file is not None:
+            if uploaded_file.type == "application/pdf":
+                extra_text = extract_text_from_pdf(uploaded_file)
+            else:
+                extra_text = extract_text_from_docx(uploaded_file)
+
+            if extra_text.startswith("[Error"):
+                st.error(extra_text)
+            else:
+                st.success("Archivo cargado correctamente. Se integrará al análisis.")
+
+    texto_para_analizar = (fragmento + "\n\n" + extra_text).strip()
+
+    st.markdown("---")
+    st.header("3. Análisis automatizado con IA")
+
+    analizar = st.button("🚀 Analizar caso con Centinela Digital")
+
+    if analizar:
+        if not texto_para_analizar:
+            st.error("Por favor ingresa un fragmento de texto o carga un archivo para analizar.")
         else:
-            tipo_producto = tipo_seleccion
+            with st.spinner("Analizando el caso con IA…"):
+                analysis = analyze_with_openai(texto_para_analizar, rol, tipo_producto)
 
-    st.subheader("2. Texto del trabajo (fragmento para análisis)")
+            fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+            case_data = {
+                "fecha": fecha,
+                "rol": rol,
+                "tipo_producto": tipo_producto,
+                "texto_longitud": len(texto_para_analizar),
+            }
 
-    texto_trabajo = st.text_area(
-        "Puedes pegar aquí un fragmento relevante del trabajo académico o científico.",
-        height=220,
-        placeholder=(
-            "Ejemplo: introducción, discusión, análisis de resultados o cualquier sección donde "
-            "quieras evaluar la coherencia, el estilo y los posibles riesgos éticos."
-        ),
-    )
+            # Guardar en histórico de la sesión
+            st.session_state["historial"].append(
+                {
+                    "fecha": fecha,
+                    "rol": rol,
+                    "tipo_producto": tipo_producto,
+                    "nivel_riesgo_global": analysis.get("nivel_riesgo_global", ""),
+                    **{f"dim_{k}": v for k, v in analysis.get("dimensiones", {}).items()},
+                }
+            )
 
-    analizar_btn = st.button(
-        "Analizar caso con IA",
-        type="primary",
-        use_container_width=True,
-    )
+            # ---------------- RESULTADOS PRINCIPALES ----------------
+            st.subheader("Resultados principales")
 
-    if analizar_btn:
-        if not texto_trabajo.strip():
-            st.warning("Por favor pega al menos un fragmento de texto para analizar.")
+            col_a, col_b, col_c = st.columns(3)
+            sentimiento = analysis.get("sentimiento_global", "neutral")
+            riesgo_global = analysis.get("nivel_riesgo_global", "medio")
+            kpis = analysis.get("kpis", {})
+
+            def riesgo_badge(level: str) -> str:
+                level = level.lower()
+                if level == "alto":
+                    cls = "risk-high"
+                elif level == "medio":
+                    cls = "risk-medium"
+                else:
+                    cls = "risk-low"
+                return f'<span class="{cls}">{level.upper()}</span>'
+
+            col_a.markdown(f"**Sentimiento global:** `{sentimiento}`")
+            col_b.markdown(
+                f"**Nivel de riesgo global:** {riesgo_badge(riesgo_global)}",
+                unsafe_allow_html=True,
+            )
+            col_c.markdown(f"**Palabras aproximadas:** `{kpis.get('n_palabras', '---')}`")
+
+            st.markdown("### Matriz de riesgo por dimensiones")
+            dim_df = pd.DataFrame(
+                [
+                    {"Dimensión": d, "Riesgo": v}
+                    for d, v in analysis.get("dimensiones", {}).items()
+                ]
+            )
+
+            if not dim_df.empty:
+                try:
+                    chart = (
+                        alt.Chart(dim_df)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("Riesgo:Q", scale=alt.Scale(domain=[0, 100])),
+                            y=alt.Y("Dimensión:N", sort="-x"),
+                            tooltip=["Dimensión", "Riesgo"],
+                        )
+                        .properties(height=220)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"No se pudo renderizar el gráfico de riesgo: {e}")
+                    st.dataframe(dim_df)
+            else:
+                st.info("No se encontraron datos de dimensiones de riesgo.")
+
+            # ---------------- RED FLAGS E INSIGHTS ----------------
+            st.markdown("### Red flags / Alertas detectadas")
+            red_flags = analysis.get("red_flags", [])
+            if red_flags:
+                for rf in red_flags:
+                    st.markdown(f"- ⚠️ {rf}")
+            else:
+                st.markdown("- ✅ No se identificaron red flags críticas.")
+
+            st.markdown("### Principales insights analíticos")
+            for ins in analysis.get("insights", []):
+                st.markdown(f"- 💡 {ins}")
+
+            st.markdown("### Recomendaciones para mitigar riesgos")
+            for rec in analysis.get("recomendaciones", []):
+                st.markdown(f"- 🩺 {rec}")
+
+            st.markdown("### Resumen narrativo del caso")
+            st.write(analysis.get("resumen", ""))
+
+            # ---------------- DESCARGA DE INFORMES ----------------
+            st.markdown("---")
+            st.subheader("4. Informes automáticos para comité / tutor")
+
+            pdf_bytes = build_pdf_report(case_data, analysis)
+            docx_bytes = build_word_report(case_data, analysis)
+
+            col_pdf, col_docx = st.columns(2)
+            col_pdf.download_button(
+                label="📄 Descargar informe en PDF",
+                data=pdf_bytes,
+                file_name="informe_centinela_digital.pdf",
+                mime="application/pdf",
+            )
+            col_docx.download_button(
+                label="📝 Descargar informe en Word",
+                data=docx_bytes,
+                file_name="informe_centinela_digital.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+
+# -------------------------------------------------------------------
+# TAB 2 – DASHBOARDS Y COMITÉ DE ÉTICA
+# -------------------------------------------------------------------
+with tab_dashboard:
+    st.header("Panel de control para comités de ética y programas académicos")
+
+    historial = st.session_state.get("historial", [])
+    if not historial:
+        st.info(
+            "Aún no hay casos analizados en esta sesión. "
+            "Vuelve a la pestaña *Analizar un caso* y genera al menos un análisis."
+        )
+    else:
+        df = pd.DataFrame(historial)
+
+        st.subheader("Resumen general de casos analizados (solo esta sesión)")
+        st.dataframe(df)
+
+        col1, col2 = st.columns(2)
+
+        # Distribución por tipo de producto
+        with col1:
+            st.markdown("**Casos por tipo de producto**")
+            tipo_counts = df["tipo_producto"].value_counts().reset_index()
+            tipo_counts.columns = ["Tipo de producto", "Casos"]
+            chart_tipo = (
+                alt.Chart(tipo_counts)
+                .mark_bar()
+                .encode(
+                    x="Casos:Q",
+                    y="Tipo de producto:N",
+                    tooltip=["Tipo de producto", "Casos"],
+                )
+                .properties(height=220)
+            )
+            st.altair_chart(chart_tipo, use_container_width=True)
+
+        # Distribución por nivel de riesgo
+        with col2:
+            st.markdown("**Casos por nivel de riesgo global**")
+            riesgo_counts = df["nivel_riesgo_global"].value_counts().reset_index()
+            riesgo_counts.columns = ["Nivel de riesgo", "Casos"]
+            chart_riesgo = (
+                alt.Chart(riesgo_counts)
+                .mark_bar()
+                .encode(
+                    x="Casos:Q",
+                    y="Nivel de riesgo:N",
+                    tooltip=["Nivel de riesgo", "Casos"],
+                )
+                .properties(height=220)
+            )
+            st.altair_chart(chart_riesgo, use_container_width=True)
+
+        st.markdown("### Matriz promedio de riesgo por dimensión")
+        dim_cols = [c for c in df.columns if c.startswith("dim_")]
+        if dim_cols:
+            dim_avg = (
+                df[dim_cols]
+                .mean(numeric_only=True)
+                .reset_index()
+                .rename(columns={"index": "Dimensión", 0: "Riesgo promedio"})
+            )
+            dim_avg["Dimensión"] = dim_avg["Dimensión"].str.replace("dim_", "")
+            chart_dim_avg = (
+                alt.Chart(dim_avg)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Riesgo promedio:Q", scale=alt.Scale(domain=[0, 100])),
+                    y="Dimensión:N",
+                    tooltip=["Dimensión", "Riesgo promedio"],
+                )
+                .properties(height=220)
+            )
+            st.altair_chart(chart_dim_avg, use_container_width=True)
         else:
-            with st.spinner("Analizando el caso con IA (puede tardar algunos segundos)..."):
-                resultado = analizar_texto(texto_trabajo, rol, tipo_producto)
+            st.info("Aún no hay información de dimensiones de riesgo en el histórico.")
 
-            mostrar_resultados_analisis(resultado)
+        st.markdown(
+            """
+            Esta vista puede servir como **panel del comité de ética** o del **programa académico** 
+            para identificar patrones de riesgo en semilleros, cursos o líneas de investigación 
+            (por ejemplo, muchos casos con riesgo ético alto en cierto tipo de trabajo).
+            """
+        )
 
-# --------------------------------------------
-# TAB 2: Estado actual y próximos pasos
-# --------------------------------------------
-
-with tabs[1]:
-    st.subheader("📊 Estado actual del modelo web (versión inicial)")
+# -------------------------------------------------------------------
+# TAB 3 – INFORMACIÓN Y PRÓXIMOS PASOS
+# -------------------------------------------------------------------
+with tab_info:
+    st.header("Estado actual y próximos pasos del modelo Centinela Digital")
 
     st.markdown(
         """
-Esta es una **versión mínima estable** del modelo de monitoreo **Centinela Digital**, diseñada
-para ser desplegada en Streamlit Cloud y servir como base para iteraciones futuras.
+        **Estado actual (versión web estable):**
+        - Registro del rol y tipo de producto.
+        - Carga directa de archivos PDF / Word.
+        - Análisis automatizado con IA (o análisis básico si no hay API key).
+        - Matriz de riesgo por dimensiones metodológica, ética, bibliográfica, redacción y uso de IA.
+        - Detección de *red flags* y recomendaciones.
+        - Generación automática de informes en PDF y Word.
+        - Panel de control con resúmenes para comités de ética y programas académicos.
 
-Incluye actualmente:
-
-- Registro del **rol** de quien entrega el trabajo.
-- Selección del **tipo de producto académico**.
-- Área para pegar un fragmento del texto a analizar.
-- **Análisis automático con IA** (OpenAI/ChatGPT si está configurado, o análisis local de respaldo).
-- Detección de:
-  - sentimiento global,
-  - nivel de riesgo de integridad,
-  - red flags de posible uso indebido de IA o problemas éticos/metodológicos.
-- Visualización de **KPIs** en gráfico de barras.
-- Listado de insights y recomendaciones prácticas.
-
-Próximos pasos que podremos ir agregando:
-
-1. Carga directa de archivos **Word/PDF**.
-2. Matriz de riesgo detallada por dimensiones (metodológica, ética, bibliográfica, etc.).
-3. Generación automática de **informes estructurados** en PDF o Word.
-4. Paneles de control (dashboards) para **comités de ética** y **programas académicos**.
-5. Registro de históricos para seguimiento de semilleros y líneas de investigación.
-
-Todo el desarrollo conceptual, ético y metodológico del modelo corresponde al:
-
-> **Prof. Anderson Díaz Pérez – Autor del software Centinela Digital®.**
-"""
+        **Próximos módulos posibles:**
+        - Persistencia de históricos en base de datos institucional (semilleros, cohortes, líneas).
+        - Integración con plataformas institucionales (Moodle, Teams, LMS propios).
+        - Módulo avanzado de verificación de referencias (Crossref / PubMed).
+        - Scoring específico para convocatorias de investigación y evaluación de proyectos.
+        """
     )
 
-    st.info(
-        "Si lo deseas, podemos seguir ampliando módulos específicos (por ejemplo, "
-        "módulo para comités de ética, módulo para trabajos de grado, panel por asignatura, etc.)."
+    st.markdown(
+        """
+        <p class="small-text">
+        Este software fue conceptualizado y desarrollado como prototipo por 
+        <strong>Dr. Anderson Díaz Pérez</strong>, integrando principios de bioética, 
+        integridad científica e inteligencia artificial aplicada a la vigilancia académica.
+        </p>
+        """,
+        unsafe_allow_html=True,
     )

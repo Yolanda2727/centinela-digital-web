@@ -1,4 +1,9 @@
 streamlit==1.39.0
 pandas
+numpy
 altair
-openai>=1.0.0
+PyPDF2
+python-docx
+fpdf2
+openai==0.28.0
+

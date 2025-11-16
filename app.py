@@ -351,7 +351,7 @@ st.sidebar.markdown(
 **Monitor de integridad académica y científica con apoyo de IA.**
 
 Software desarrollado por **Prof. Anderson Díaz Pérez**  
-(doctor en Bioética y Salud Pública, especialista en IA).
+(Doctor en Bioética, Doctor en Salud Pública, Magister en Ciencias Basicas Biomedicas, Especialista en IA).
 
 Versión web inicial, orientada a:
 - Docentes y tutores.
@@ -380,8 +380,7 @@ tabs = st.tabs(
 with tabs[0]:
     st.title("Centinela Digital")
     st.markdown(
-        "### Monitorizando la integridad académica y científica con apoyo de IA\n"
-        "Versión web inicial. Vamos a construirla paso a paso, de forma profesional."
+        "### Monitorizando la integridad académica y científica con apoyo de IA\n"      
     )
 
     with st.form("form_caso"):

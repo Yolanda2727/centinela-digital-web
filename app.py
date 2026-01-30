@@ -12,8 +12,26 @@ import requests
 # ============================================================
 # CONFIGURACIÓN OPENAI
 # ============================================================
+import os
+
+# Cargar la clave desde `st.secrets` (Streamlit Cloud) o desde la variable
+# de entorno `OPENAI_API_KEY`. Si se encuentra, la colocamos en env para
+# que el cliente la use de forma consistente.
+OPENAI_OK = False
+OPENAI_KEY = None
 try:
-    # Usa la variable de entorno OPENAI_API_KEY (en Streamlit Cloud: st.secrets)
+    # `st` ya está importado arriba; usar st.secrets si existe
+    OPENAI_KEY = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
+except Exception:
+    OPENAI_KEY = None
+
+if not OPENAI_KEY:
+    OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
+
+if OPENAI_KEY:
+    os.environ["OPENAI_API_KEY"] = OPENAI_KEY
+
+try:
     client = OpenAI()
     OPENAI_OK = True
 except Exception:

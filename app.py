@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 from fpdf import FPDF
 from openai import OpenAI
+import requests
 
 # ============================================================
 # CONFIGURACIÓN OPENAI
@@ -419,6 +420,7 @@ tabs = st.tabs(
         "🔍 Analizar un caso",
         "📊 Estado actual y próximos pasos",
         "🏛️ Panel para comités y programas",
+        "🔒 Integridad & Auditoría",
     ]
 )
 
@@ -747,3 +749,73 @@ histórica (programas, cohortes, asignaturas, semilleros, etc.).
         st.info(
             "Aún no hay datos para el panel. Analiza uno o más casos en la pestaña **Analizar un caso**."
         )
+
+
+# ============================================================
+# TAB 4 – INTEGRIDAD & AUDITORÍA (integración con API v2.2)
+# ============================================================
+with tabs[3]:
+    st.header("Integridad avanzada y auditoría (API v2.2)")
+
+    st.markdown(
+        """
+Esta pestaña permite consultar los endpoints implementados en `api_v2_mejorado.py`.
+Si tu API está desplegada en otra URL (no `localhost`), introduce la URL base abajo.
+
+Nota: para que estas llamadas funcionen desde la app desplegada, la API debe ser accesible públicamente
+y permitir CORS desde el dominio de la app.
+"""
+    )
+
+    api_base = st.text_input("URL base de la API (ej: http://localhost:5000 o https://mi-api.example.com)", value="http://localhost:5000")
+
+    st.subheader("1) Ejecutar análisis de integridad (POST /api/reporte-integridad)")
+    with st.form("form_integridad"):
+        contenido_integridad = st.text_area("Contenido a analizar (integridad)", height=200)
+        rol_integridad = st.selectbox("Rol del autor", ["Investigador", "Estudiante", "Profesor"], index=0)
+        submit_int = st.form_submit_button("Analizar integridad (API)")
+
+    if submit_int:
+        if not contenido_integridad.strip():
+            st.error("Por favor pega o sube contenido para analizar.")
+        else:
+            try:
+                url = api_base.rstrip("/") + "/api/reporte-integridad"
+                headers = {"Content-Type": "application/json"}
+                payload = {"contenido": contenido_integridad, "rol": rol_integridad}
+                resp = requests.post(url, json=payload, headers=headers, timeout=15)
+                if resp.status_code == 200:
+                    st.success("Análisis de integridad recibido")
+                    st.json(resp.json())
+                else:
+                    st.error(f"Error {resp.status_code}: {resp.text}")
+            except Exception as e:
+                st.error(f"No se pudo conectar con la API: {e}")
+
+    st.markdown("---")
+    st.subheader("2) Consultar log de actividad (GET /api/log-actividad)")
+    with st.form("form_log"):
+        usuario_log = st.text_input("Usuario (vacío = yo)")
+        dias_log = st.number_input("Días hacia atrás", min_value=1, max_value=365, value=30)
+        limite_log = st.number_input("Límite de registros", min_value=1, max_value=1000, value=50)
+        submit_log = st.form_submit_button("Consultar log (API)")
+
+    if submit_log:
+        try:
+            params = {"días": int(dias_log), "límite": int(limite_log)}
+            if usuario_log:
+                params["usuario"] = usuario_log
+            url = api_base.rstrip("/") + "/api/log-actividad"
+            resp = requests.get(url, params=params, timeout=12)
+            if resp.status_code == 200:
+                st.success("Historial recibido")
+                st.json(resp.json())
+            else:
+                st.error(f"Error {resp.status_code}: {resp.text}")
+        except Exception as e:
+            st.error(f"No se pudo conectar con la API: {e}")
+
+    st.markdown("---")
+    st.info(
+        "Si la API no está desplegada o es inaccesible desde esta app, puedes ejecutar `python3 api_v2_mejorado.py` localmente y usar `http://localhost:5000` como URL base, o desplegar la API en una URL pública y pegarla arriba."
+    )
